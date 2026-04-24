@@ -1042,11 +1042,13 @@ class AudioPlayer {
     }
   }
 
-  /// Sets whether echo audio effect should be enabled in audio playback. (Currently
-  /// Android only).
+  /// Sets whether echo audio effect should be enabled in audio playback.
+  ///
+  /// Supported on Android (via ExoPlayer AudioProcessor) and on iOS/macOS
+  /// (via MTAudioProcessingTap). The name is kept for backward compatibility.
   Future<void> androidSetEchoEffectEnabled(bool enabled) async {
     if (_disposed) return;
-    if (!_isAndroid() && !_isUnitTest()) return;
+    if (!_isAndroid() && !_isDarwin() && !_isUnitTest()) return;
     final previouslyEnabled = androidEchoAudioEffectEnabled;
     if (enabled == previouslyEnabled) return;
     _androidEchoAudioEffectEnabledSubject.add(enabled);
@@ -1705,7 +1707,7 @@ class AudioPlayer {
             this.automaticallyWaitsToMinimizeStalling;
         final playing = this.playing;
 
-        if (_isAndroid() || _isUnitTest()) {
+        if (_isAndroid() || _isDarwin() || _isUnitTest()) {
           try {
             await platform.androidEchoEffectSetEnabled(
                 AndroidEchoEffectSetEnabledRequest(enabled: androidEchoAudioEffectEnabled));
