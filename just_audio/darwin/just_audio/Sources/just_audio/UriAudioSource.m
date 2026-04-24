@@ -2,7 +2,9 @@
 #import "./include/just_audio/IndexedAudioSource.h"
 #import "./include/just_audio/IndexedPlayerItem.h"
 #import "./include/just_audio/LoadControl.h"
+#import "./include/just_audio/MultiTapEchoTap.h"
 #import <AVFoundation/AVFoundation.h>
+#import <MediaToolbox/MediaToolbox.h>
 
 @implementation UriAudioSource {
     NSString *_uri;
@@ -12,15 +14,21 @@
     LoadControl *_loadControl;
     NSMutableDictionary *_headers;
     NSDictionary *_options;
+    atomic_bool *_echoEnabled;
 }
 
 - (instancetype)initWithId:(NSString *)sid uri:(NSString *)uri loadControl:(LoadControl *)loadControl headers:(NSDictionary *)headers options:(NSDictionary *)options {
+    return [self initWithId:sid uri:uri loadControl:loadControl headers:headers options:options echoEnabled:NULL];
+}
+
+- (instancetype)initWithId:(NSString *)sid uri:(NSString *)uri loadControl:(LoadControl *)loadControl headers:(NSDictionary *)headers options:(NSDictionary *)options echoEnabled:(atomic_bool *)echoEnabled {
     self = [super initWithId:sid];
     NSAssert(self, @"super init cannot be nil");
     _uri = uri;
     _loadControl = loadControl;
     _headers = headers != (id)[NSNull null] ? [headers mutableCopy] : nil;
     _options = options;
+    _echoEnabled = echoEnabled;
     _playerItem = [self createPlayerItem:uri];
     _playerItem2 = nil;
     return self;
@@ -90,7 +98,49 @@
         }
     }
 
+    [self attachEchoTapToItem:item];
+
     return item;
+}
+
+- (void)attachEchoTapToItem:(IndexedPlayerItem *)item {
+    if (!_echoEnabled) return;
+    AVAsset *asset = item.asset;
+    if (!asset) return;
+
+    // Loading tracks asynchronously avoids blocking. Once available we install
+    // the MTAudioProcessingTap for the first audio track on the player item.
+    __weak IndexedPlayerItem *weakItem = item;
+    atomic_bool *enabledFlagSnapshot = _echoEnabled;
+    [asset loadValuesAsynchronouslyForKeys:@[@"tracks"] completionHandler:^{
+        NSError *error = nil;
+        AVKeyValueStatus status = [asset statusOfValueForKey:@"tracks" error:&error];
+        if (status != AVKeyValueStatusLoaded) {
+            NSLog(@"UriAudioSource: tracks not loaded (status=%ld, err=%@); skipping echo tap", (long)status, error);
+            return;
+        }
+        NSArray<AVAssetTrack *> *audioTracks = [asset tracksWithMediaType:AVMediaTypeAudio];
+        if (audioTracks.count == 0) {
+            NSLog(@"UriAudioSource: no audio tracks on asset; skipping echo tap");
+            return;
+        }
+        AVAssetTrack *audioTrack = audioTracks.firstObject;
+        MTAudioProcessingTapRef tap = multi_tap_echo_create(enabledFlagSnapshot);
+        if (!tap) {
+            return;
+        }
+        AVMutableAudioMixInputParameters *params = [AVMutableAudioMixInputParameters audioMixInputParametersWithTrack:audioTrack];
+        params.audioTapProcessor = tap;
+        CFRelease(tap);
+        AVMutableAudioMix *mix = [AVMutableAudioMix audioMix];
+        mix.inputParameters = @[params];
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            IndexedPlayerItem *strongItem = weakItem;
+            if (!strongItem) return;
+            strongItem.audioMix = mix;
+        });
+    }];
 }
 
 // Not used. XXX: Remove?

@@ -9,6 +9,7 @@
 #import "./include/just_audio/ClippingAudioSource.h"
 #import <AVFoundation/AVFoundation.h>
 #import <Foundation/Foundation.h>
+#import <stdatomic.h>
 #import <stdlib.h>
 #include <TargetConditionals.h>
 
@@ -54,6 +55,9 @@
     NSDictionary<NSString *, NSObject *> *_icyMetadata;
     NSNumber *_errorCode;
     NSString *_errorMessage;
+    // Shared echo-effect enable flag. Heap-allocated so MTAudioProcessingTap
+    // callbacks can reference a stable pointer from the realtime audio thread.
+    atomic_bool *_echoEnabled;
 }
 
 - (instancetype)initWithRegistrar:(NSObject<FlutterPluginRegistrar> *)registrar playerId:(NSString*)idParam loadConfiguration:(NSDictionary *)loadConfiguration useLazyPreparation:(BOOL)useLazyPreparation {
@@ -116,6 +120,8 @@
     _icyMetadata = @{};
     _errorCode = (NSNumber *)[NSNull null];
     _errorMessage = (NSString *)[NSNull null];
+    _echoEnabled = (atomic_bool *)calloc(1, sizeof(atomic_bool));
+    atomic_init(_echoEnabled, false);
     __weak __typeof__(self) weakSelf = self;
     [_methodChannel setMethodCallHandler:^(FlutterMethodCall* call, FlutterResult result) {
         [weakSelf handleMethodCall:call result:result];
@@ -180,6 +186,11 @@
             [self concatenatingMove:(NSString *)request[@"id"] currentIndex:[request[@"currentIndex"] intValue] newIndex:[request[@"newIndex"] intValue] shuffleOrder:(NSArray<NSNumber *> *)request[@"shuffleOrder"]];
             result(@{});
         } else if ([@"setAndroidAudioAttributes" isEqualToString:call.method]) {
+            result(@{});
+        } else if ([@"androidEchoEffectSetEnabled" isEqualToString:call.method]) {
+            if (_echoEnabled) {
+                atomic_store_explicit(_echoEnabled, (BOOL)[request[@"enabled"] boolValue], memory_order_relaxed);
+            }
             result(@{});
         } else {
             result(FlutterMethodNotImplemented);
@@ -472,11 +483,11 @@
 - (AudioSource *)decodeAudioSource:(NSDictionary *)data {
     NSString *type = data[@"type"];
     if ([@"progressive" isEqualToString:type]) {
-        return [[UriAudioSource alloc] initWithId:data[@"id"] uri:data[@"uri"] loadControl:_loadControl headers:data[@"headers"] options:data[@"options"]];
+        return [[UriAudioSource alloc] initWithId:data[@"id"] uri:data[@"uri"] loadControl:_loadControl headers:data[@"headers"] options:data[@"options"] echoEnabled:_echoEnabled];
     } else if ([@"dash" isEqualToString:type]) {
-        return [[UriAudioSource alloc] initWithId:data[@"id"] uri:data[@"uri"] loadControl:_loadControl headers:data[@"headers"] options:data[@"options"]];
+        return [[UriAudioSource alloc] initWithId:data[@"id"] uri:data[@"uri"] loadControl:_loadControl headers:data[@"headers"] options:data[@"options"] echoEnabled:_echoEnabled];
     } else if ([@"hls" isEqualToString:type]) {
-        return [[UriAudioSource alloc] initWithId:data[@"id"] uri:data[@"uri"] loadControl:_loadControl headers:data[@"headers"] options:data[@"options"]];
+        return [[UriAudioSource alloc] initWithId:data[@"id"] uri:data[@"uri"] loadControl:_loadControl headers:data[@"headers"] options:data[@"options"] echoEnabled:_echoEnabled];
     } else if ([@"concatenating" isEqualToString:type]) {
         return [[ConcatenatingAudioSource alloc] initWithId:data[@"id"]
                                                audioSources:[self decodeAudioSources:data[@"children"]]
@@ -1403,6 +1414,15 @@
     [_eventChannel dispose];
     [_dataEventChannel dispose];
     [_methodChannel setMethodCallHandler:nil];
+}
+
+- (void)dealloc {
+    // Free the shared echo-effect flag after the player (and thus any
+    // MTAudioProcessingTap callbacks that referenced it) has been torn down.
+    if (_echoEnabled) {
+        free(_echoEnabled);
+        _echoEnabled = NULL;
+    }
 }
 
 @end

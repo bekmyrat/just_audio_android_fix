@@ -1,6 +1,7 @@
 #import "IndexedAudioSource.h"
 #import "LoadControl.h"
 #import <AVFoundation/AVFoundation.h>
+#import <stdatomic.h>
 #if TARGET_OS_OSX
 #import <FlutterMacOS/FlutterMacOS.h>
 #else
@@ -12,5 +13,6 @@
 @property (readonly, nonatomic) NSString *uri;
 
 - (instancetype)initWithId:(NSString *)sid uri:(NSString *)uri loadControl:(LoadControl *)loadControl headers:(NSDictionary *)headers options:(NSDictionary *)options;
+- (instancetype)initWithId:(NSString *)sid uri:(NSString *)uri loadControl:(LoadControl *)loadControl headers:(NSDictionary *)headers options:(NSDictionary *)options echoEnabled:(atomic_bool *)echoEnabled;
 
 @end
