@@ -28,5 +28,6 @@
 - (void)applyPreferredForwardBufferDuration;
 - (void)applyCanUseNetworkResourcesForLiveStreamingWhilePaused;
 - (void)applyPreferredPeakBitRate;
+- (void)applyEchoTapIfEnabled;
 
 @end

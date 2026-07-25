@@ -113,4 +113,7 @@
 - (void)applyPreferredPeakBitRate {
 }
 
+- (void)applyEchoTapIfEnabled {
+}
+
 @end

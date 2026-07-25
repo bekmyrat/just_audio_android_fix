@@ -98,15 +98,30 @@
         }
     }
 
-    [self attachEchoTapToItem:item];
+    // The echo processing tap is attached lazily (see -applyEchoTapIfEnabled),
+    // only to the item that is actually becoming current and only when echo is
+    // enabled. Attaching here for every source would force a per-asset
+    // `loadValuesAsynchronouslyForKeys` (a network header fetch for remote URLs)
+    // for the whole queue, which stalls playback on large playlists.
 
     return item;
 }
 
+- (void)applyEchoTapIfEnabled {
+    [self attachEchoTapToItem:_playerItem];
+    if (_playerItem2) {
+        [self attachEchoTapToItem:_playerItem2];
+    }
+}
+
 - (void)attachEchoTapToItem:(IndexedPlayerItem *)item {
-    if (!_echoEnabled) return;
+    if (!_echoEnabled || !atomic_load_explicit(_echoEnabled, memory_order_relaxed)) return;
+    if (!item || item.echoTapAttached) return;
     AVAsset *asset = item.asset;
     if (!asset) return;
+    // Guard before kicking off the async load so repeated calls (e.g. on each
+    // currentItem transition) don't trigger duplicate asset loads/taps.
+    item.echoTapAttached = YES;
 
     // Loading tracks asynchronously avoids blocking. Once available we install
     // the MTAudioProcessingTap for the first audio track on the player item.

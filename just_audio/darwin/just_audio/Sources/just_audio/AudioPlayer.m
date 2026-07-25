@@ -188,8 +188,15 @@
         } else if ([@"setAndroidAudioAttributes" isEqualToString:call.method]) {
             result(@{});
         } else if ([@"androidEchoEffectSetEnabled" isEqualToString:call.method]) {
+            BOOL echoEnabled = (BOOL)[request[@"enabled"] boolValue];
             if (_echoEnabled) {
-                atomic_store_explicit(_echoEnabled, (BOOL)[request[@"enabled"] boolValue], memory_order_relaxed);
+                atomic_store_explicit(_echoEnabled, echoEnabled, memory_order_relaxed);
+            }
+            // Toggling on won't fire the currentItem observer, so attach the tap
+            // to the item that is already playing right now.
+            if (echoEnabled && _indexedAudioSources.count > 0 &&
+                _index >= 0 && _index < _indexedAudioSources.count) {
+                [_indexedAudioSources[_index] applyEchoTapIfEnabled];
             }
             result(@{});
         } else {
@@ -934,6 +941,11 @@
                 [self broadcastPlaybackEvent];
             }
         }
+        // Lazily install the echo processing tap on the item that is actually
+        // becoming current, rather than on every source at creation time (which
+        // would force a network asset load per queue item). No-op when echo is
+        // disabled or already attached.
+        [playerItem.audioSource applyEchoTapIfEnabled];
         //NSLog(@"currentItem changed. _index=%d", _index);
         _bufferUnconfirmed = YES;
         // If we've skipped or transitioned to a new item and we're not

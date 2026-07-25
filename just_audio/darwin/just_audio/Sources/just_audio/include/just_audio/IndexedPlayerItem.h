@@ -5,5 +5,6 @@
 @interface IndexedPlayerItem : AVPlayerItem
 
 @property (readwrite, nonatomic, weak) IndexedAudioSource *audioSource;
+@property (readwrite, nonatomic) BOOL echoTapAttached;
 
 @end

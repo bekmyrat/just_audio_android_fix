@@ -3,4 +3,5 @@
 
 @implementation IndexedPlayerItem
 @synthesize audioSource;
+@synthesize echoTapAttached;
 @end
