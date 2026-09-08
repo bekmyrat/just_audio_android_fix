@@ -146,6 +146,11 @@ public class AudioPlayer implements MethodCallHandler, Player.Listener, Metadata
     private /*@Nullable*/ MultiTapEchoProcessor echoProcessor;
     private boolean isEchoEnabled = false;
 
+    private /*@Nullable*/ KaraokeMixProcessor karaokeProcessor;
+    private boolean isKaraokeEnabled = false;
+    private float karaokeVocalGain = 1.0f;
+    private float karaokeInstrumentalGain = 1.0f;
+
     public AudioPlayer(
         final Context applicationContext,
         final BinaryMessenger messenger,
@@ -479,6 +484,16 @@ public class AudioPlayer implements MethodCallHandler, Player.Listener, Metadata
                 setEchoAudioEffectEnabled((Boolean) call.argument("enabled"));
                 result.success(new HashMap<String, Object>());
                 break;
+            case "karaokeSetMix":
+                setKaraokeMix(
+                    (Boolean) call.argument("enabled"),
+                    (float) ((double) ((Double) call.argument("vocalGain"))),
+                    (float) ((double) ((Double) call.argument("instrumentalGain"))));
+                Map<String, Object> karaokeReply = new HashMap<String, Object>();
+                karaokeReply.put("hasKaraokeSource",
+                    karaokeProcessor != null && karaokeProcessor.hasKaraokeSource());
+                result.success(karaokeReply);
+                break;
             case "setLoopMode":
                 setLoopMode((Integer) call.argument("loopMode"));
                 result.success(new HashMap<String, Object>());
@@ -790,6 +805,11 @@ public class AudioPlayer implements MethodCallHandler, Player.Listener, Metadata
             echoProcessor = echoAudioProcessor;
             echoAudioProcessor.setEnabled(isEchoEnabled);
 
+            final KaraokeMixProcessor karaokeAudioProcessor = new KaraokeMixProcessor();
+            karaokeProcessor = karaokeAudioProcessor;
+            karaokeAudioProcessor.setEnabled(isKaraokeEnabled);
+            karaokeAudioProcessor.setGains(karaokeVocalGain, karaokeInstrumentalGain);
+
             RenderersFactory renderersFactory = (eventHandler, videoListener, audioListener, textOutput, metadataOutput) -> {
               DefaultRenderersFactory defRenderersFactory = new DefaultRenderersFactory(context) {
                   @Override
@@ -803,7 +823,10 @@ public class AudioPlayer implements MethodCallHandler, Player.Listener, Metadata
                             //.setEnableAudioOutputPlaybackParameters(enableAudioOutputPlaybackParams)
                             .setEnableAudioTrackPlaybackParams(enableAudioOutputPlaybackParams)
                             .setAudioProcessorChain(new DefaultAudioSink.DefaultAudioProcessorChain(
-                                new AudioProcessor[] { echoAudioProcessor }
+                                // Karaoke first: it folds a four-channel source
+                                // down to the stereo pair everything downstream
+                                // (echo included) expects to work on.
+                                new AudioProcessor[] { karaokeAudioProcessor, echoAudioProcessor }
                             ))
                             .build();
                   }
@@ -1056,6 +1079,22 @@ public class AudioPlayer implements MethodCallHandler, Player.Listener, Metadata
         }
     }
 
+    /**
+     * Sets the per-stem gains applied to four-channel karaoke sources. Kept on
+     * the player as well as on the processor so that the values survive the
+     * processor being rebuilt with the ExoPlayer instance.
+     */
+    public void setKaraokeMix(final boolean enabled, final float vocalGain,
+                              final float instrumentalGain) {
+        isKaraokeEnabled = enabled;
+        karaokeVocalGain = vocalGain;
+        karaokeInstrumentalGain = instrumentalGain;
+        if (karaokeProcessor != null) {
+            karaokeProcessor.setEnabled(enabled);
+            karaokeProcessor.setGains(vocalGain, instrumentalGain);
+        }
+    }
+
     public void setSkipSilenceEnabled(final boolean enabled) {
         player.setSkipSilenceEnabled(enabled);
     }
@@ -1097,6 +1136,7 @@ public class AudioPlayer implements MethodCallHandler, Player.Listener, Metadata
         mediaSources.clear();
         clearAudioEffects();
         echoProcessor = null;
+        karaokeProcessor = null;
         if (player != null) {
             player.release();
             player = null;

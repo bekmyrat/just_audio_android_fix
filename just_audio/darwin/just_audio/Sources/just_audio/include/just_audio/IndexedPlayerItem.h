@@ -6,5 +6,6 @@
 
 @property (readwrite, nonatomic, weak) IndexedAudioSource *audioSource;
 @property (readwrite, nonatomic) BOOL echoTapAttached;
+@property (readwrite, nonatomic) BOOL karaokeTapAttached;
 
 @end

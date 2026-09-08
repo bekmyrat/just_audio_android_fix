@@ -7,6 +7,7 @@
 #import "./include/just_audio/ConcatenatingAudioSource.h"
 #import "./include/just_audio/LoopingAudioSource.h"
 #import "./include/just_audio/ClippingAudioSource.h"
+#import "./include/just_audio/KaraokeMixTap.h"
 #import <AVFoundation/AVFoundation.h>
 #import <Foundation/Foundation.h>
 #import <stdatomic.h>
@@ -58,6 +59,8 @@
     // Shared echo-effect enable flag. Heap-allocated so MTAudioProcessingTap
     // callbacks can reference a stable pointer from the realtime audio thread.
     atomic_bool *_echoEnabled;
+    // Shared karaoke mix state, heap-allocated for the same reason.
+    KaraokeMixParams *_karaokeParams;
 }
 
 - (instancetype)initWithRegistrar:(NSObject<FlutterPluginRegistrar> *)registrar playerId:(NSString*)idParam loadConfiguration:(NSDictionary *)loadConfiguration useLazyPreparation:(BOOL)useLazyPreparation {
@@ -122,6 +125,7 @@
     _errorMessage = (NSString *)[NSNull null];
     _echoEnabled = (atomic_bool *)calloc(1, sizeof(atomic_bool));
     atomic_init(_echoEnabled, false);
+    _karaokeParams = karaoke_mix_params_create();
     __weak __typeof__(self) weakSelf = self;
     [_methodChannel setMethodCallHandler:^(FlutterMethodCall* call, FlutterResult result) {
         [weakSelf handleMethodCall:call result:result];
@@ -199,6 +203,27 @@
                 [_indexedAudioSources[_index] applyEchoTapIfEnabled];
             }
             result(@{});
+        } else if ([@"karaokeSetMix" isEqualToString:call.method]) {
+            BOOL karaokeEnabled = (BOOL)[request[@"enabled"] boolValue];
+            if (_karaokeParams) {
+                atomic_store_explicit(&_karaokeParams->vocalGain,
+                                      [request[@"vocalGain"] floatValue], memory_order_relaxed);
+                atomic_store_explicit(&_karaokeParams->instrumentalGain,
+                                      [request[@"instrumentalGain"] floatValue], memory_order_relaxed);
+                atomic_store_explicit(&_karaokeParams->enabled, karaokeEnabled, memory_order_relaxed);
+            }
+            // Turning karaoke on won't fire the currentItem observer, so claim
+            // the item that is already playing right now.
+            if (karaokeEnabled && _indexedAudioSources.count > 0 &&
+                _index >= 0 && _index < _indexedAudioSources.count) {
+                [_indexedAudioSources[_index] applyKaraokeTapIfEnabled];
+            }
+            // Only meaningful once the tap has been prepared for the current
+            // item; before that it reads false. Callers re-read it as they
+            // move the slider, which is when the answer starts to matter.
+            BOOL karaokeActive = _karaokeParams
+                ? atomic_load_explicit(&_karaokeParams->active, memory_order_relaxed) : NO;
+            result(@{@"hasKaraokeSource": @(karaokeActive)});
         } else {
             result(FlutterMethodNotImplemented);
         }
@@ -490,11 +515,11 @@
 - (AudioSource *)decodeAudioSource:(NSDictionary *)data {
     NSString *type = data[@"type"];
     if ([@"progressive" isEqualToString:type]) {
-        return [[UriAudioSource alloc] initWithId:data[@"id"] uri:data[@"uri"] loadControl:_loadControl headers:data[@"headers"] options:data[@"options"] echoEnabled:_echoEnabled];
+        return [[UriAudioSource alloc] initWithId:data[@"id"] uri:data[@"uri"] loadControl:_loadControl headers:data[@"headers"] options:data[@"options"] echoEnabled:_echoEnabled karaokeParams:_karaokeParams];
     } else if ([@"dash" isEqualToString:type]) {
-        return [[UriAudioSource alloc] initWithId:data[@"id"] uri:data[@"uri"] loadControl:_loadControl headers:data[@"headers"] options:data[@"options"] echoEnabled:_echoEnabled];
+        return [[UriAudioSource alloc] initWithId:data[@"id"] uri:data[@"uri"] loadControl:_loadControl headers:data[@"headers"] options:data[@"options"] echoEnabled:_echoEnabled karaokeParams:_karaokeParams];
     } else if ([@"hls" isEqualToString:type]) {
-        return [[UriAudioSource alloc] initWithId:data[@"id"] uri:data[@"uri"] loadControl:_loadControl headers:data[@"headers"] options:data[@"options"] echoEnabled:_echoEnabled];
+        return [[UriAudioSource alloc] initWithId:data[@"id"] uri:data[@"uri"] loadControl:_loadControl headers:data[@"headers"] options:data[@"options"] echoEnabled:_echoEnabled karaokeParams:_karaokeParams];
     } else if ([@"concatenating" isEqualToString:type]) {
         return [[ConcatenatingAudioSource alloc] initWithId:data[@"id"]
                                                audioSources:[self decodeAudioSources:data[@"children"]]
@@ -941,10 +966,12 @@
                 [self broadcastPlaybackEvent];
             }
         }
-        // Lazily install the echo processing tap on the item that is actually
+        // Lazily install the processing tap on the item that is actually
         // becoming current, rather than on every source at creation time (which
-        // would force a network asset load per queue item). No-op when echo is
-        // disabled or already attached.
+        // would force a network asset load per queue item). Both are no-ops
+        // when their effect is off or a tap is already attached; karaoke is
+        // offered the item first because its downmix is not optional.
+        [playerItem.audioSource applyKaraokeTapIfEnabled];
         [playerItem.audioSource applyEchoTapIfEnabled];
         //NSLog(@"currentItem changed. _index=%d", _index);
         _bufferUnconfirmed = YES;
@@ -1434,6 +1461,10 @@
     if (_echoEnabled) {
         free(_echoEnabled);
         _echoEnabled = NULL;
+    }
+    if (_karaokeParams) {
+        karaoke_mix_params_free(_karaokeParams);
+        _karaokeParams = NULL;
     }
 }
 

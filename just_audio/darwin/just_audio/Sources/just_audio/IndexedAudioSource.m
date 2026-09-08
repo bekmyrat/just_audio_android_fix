@@ -116,4 +116,7 @@
 - (void)applyEchoTapIfEnabled {
 }
 
+- (void)applyKaraokeTapIfEnabled {
+}
+
 @end

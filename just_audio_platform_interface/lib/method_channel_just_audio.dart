@@ -216,6 +216,14 @@ class MethodChannelAudioPlayer extends AudioPlayerPlatform {
   }
 
   @override
+  Future<KaraokeSetMixResponse> karaokeSetMix(
+      KaraokeSetMixRequest request) async {
+    return KaraokeSetMixResponse.fromMap(
+        (await _channel.invokeMethod<Map<dynamic, dynamic>>(
+            'karaokeSetMix', request.toMap()))!);
+  }
+
+  @override
   Future<AndroidLoudnessEnhancerSetTargetGainResponse>
       androidLoudnessEnhancerSetTargetGain(
           AndroidLoudnessEnhancerSetTargetGainRequest request) async {

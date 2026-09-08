@@ -217,6 +217,12 @@ abstract class AudioPlayerPlatform {
         "androidEchoEffectSetEnabled() has not been implemented.");
   }
 
+  /// Sets the per-stem gains applied to four-channel karaoke sources.
+  Future<KaraokeSetMixResponse> karaokeSetMix(
+      KaraokeSetMixRequest request) async {
+    throw UnimplementedError("karaokeSetMix() has not been implemented.");
+  }
+
   /// Sets the target gain on the Android loudness enhancer.
   Future<AndroidLoudnessEnhancerSetTargetGainResponse>
       androidLoudnessEnhancerSetTargetGain(
@@ -1368,6 +1374,48 @@ class AndroidEchoEffectSetEnabledRequest {
 class AndroidEchoEffectSetEnabledResponse {
   static AndroidEchoEffectSetEnabledResponse fromMap(Map<dynamic, dynamic> map) =>
       AndroidEchoEffectSetEnabledResponse();
+}
+
+/// Information communicated to the platform implementation when setting the
+/// mix of a four-channel karaoke source.
+///
+/// Such a source carries the vocal stem on channels 0/1 and the instrumental
+/// stem on channels 2/3; the platform folds it down to stereo applying
+/// [vocalGain] to the first pair and [instrumentalGain] to the second. When
+/// [enabled] is false both are treated as 1.0, which reproduces the original
+/// mix.
+class KaraokeSetMixRequest {
+  final bool enabled;
+  final double vocalGain;
+  final double instrumentalGain;
+
+  KaraokeSetMixRequest({
+    required this.enabled,
+    required this.vocalGain,
+    required this.instrumentalGain,
+  });
+
+  Map<dynamic, dynamic> toMap() => <dynamic, dynamic>{
+    'enabled': enabled,
+    'vocalGain': vocalGain,
+    'instrumentalGain': instrumentalGain,
+  };
+}
+
+/// Information returned by the platform implementation after setting the mix of
+/// a four-channel karaoke source.
+class KaraokeSetMixResponse {
+  /// Whether the source currently loaded really did arrive with four channels
+  /// and is being mixed. False for an ordinary stereo track — and also for a
+  /// karaoke track whose decoder handed back a downmix, which is the one way
+  /// this feature fails without making a sound.
+  final bool hasKaraokeSource;
+
+  KaraokeSetMixResponse({required this.hasKaraokeSource});
+
+  static KaraokeSetMixResponse fromMap(Map<dynamic, dynamic> map) =>
+      KaraokeSetMixResponse(
+          hasKaraokeSource: map['hasKaraokeSource'] as bool? ?? false);
 }
 
 /// Information communicated to the platform implementation when setting the

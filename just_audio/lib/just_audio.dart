@@ -198,6 +198,16 @@ class AudioPlayer {
   Stream<bool> get androidEchoAudioEffectEnabledStream =>
       _androidEchoAudioEffectEnabledSubject.stream;
 
+  final _karaokeMixSubject =
+      BehaviorSubject<KaraokeMix>.seeded(const KaraokeMix.disabled());
+
+  /// The gains currently applied to the stems of a four-channel karaoke source.
+  KaraokeMix get karaokeMix => _karaokeMixSubject.nvalue!;
+
+  /// A stream of the gains applied to the stems of a four-channel karaoke
+  /// source.
+  Stream<KaraokeMix> get karaokeMixStream => _karaokeMixSubject.stream;
+
   /// Creates an [AudioPlayer].
   ///
   /// Apps requesting remote URLs should set the [userAgent] parameter which
@@ -1061,6 +1071,55 @@ class AudioPlayer {
     }
   }
 
+  /// Sets whether the karaoke stem gains apply, leaving the gains themselves
+  /// alone. See [setKaraokeMix].
+  Future<void> setKaraokeEnabled(bool enabled) =>
+      setKaraokeMix(karaokeMix.copyWith(enabled: enabled));
+
+  /// Sets how loudly the vocal stem of a four-channel karaoke source plays,
+  /// from 0.0 (as close to removed as the separation allows) to 1.0.
+  Future<void> setKaraokeVocalGain(double gain) =>
+      setKaraokeMix(karaokeMix.copyWith(vocalGain: gain));
+
+  /// Sets how loudly the instrumental stem of a four-channel karaoke source
+  /// plays, from 0.0 to 1.0. Normally left at 1.0.
+  Future<void> setKaraokeInstrumentalGain(double gain) =>
+      setKaraokeMix(karaokeMix.copyWith(instrumentalGain: gain));
+
+  /// Sets the mix applied to four-channel karaoke sources — those carrying the
+  /// vocal stem on channels 0/1 and the instrumental stem on channels 2/3.
+  ///
+  /// Such a source is always folded down to stereo, because that is what the
+  /// output expects; [KaraokeMix.enabled] only decides whether the gains are
+  /// the ones given here or unity on both stems, which reproduces the original
+  /// mix. Ordinary stereo sources are unaffected, so this is safe to leave set
+  /// across a queue that mixes the two.
+  ///
+  /// Returns whether the source currently loaded actually has four channels.
+  /// That is only known once playback of it has begun, so a call made while
+  /// the next track is still loading reports `false`.
+  ///
+  /// Supported on Android (via an ExoPlayer AudioProcessor) and on iOS/macOS
+  /// (via an MTAudioProcessingTap). On iOS a karaoke source takes the single
+  /// audio tap a player item has, so the echo effect does not apply to it.
+  Future<bool> setKaraokeMix(KaraokeMix mix) async {
+    if (_disposed) return false;
+    if (!_isAndroid() && !_isDarwin() && !_isUnitTest()) return false;
+    final previousMix = karaokeMix;
+    _karaokeMixSubject.add(mix);
+    try {
+      final response = await (await _platform).karaokeSetMix(KaraokeSetMixRequest(
+        enabled: mix.enabled,
+        vocalGain: mix.vocalGain,
+        instrumentalGain: mix.instrumentalGain,
+      ));
+      return response.hasKaraokeSource;
+    } catch (e) {
+      _karaokeMixSubject.add(previousMix);
+      rethrow;
+    }
+  }
+
   /// Clips the current [AudioSource] to the given [start] and [end]
   /// timestamps. If [start] is null, it will be reset to the start of the
   /// original [AudioSource]. If [end] is null, it will be reset to the end of
@@ -1482,6 +1541,7 @@ class AudioPlayer {
       await _playerStateSubject.close();
       await _skipSilenceEnabledSubject.close();
       await _androidEchoAudioEffectEnabledSubject.close();
+      await _karaokeMixSubject.close();
       await _positionDiscontinuitySubject.close();
       await _sequenceSubject.close();
       await _shuffleIndicesSubject.close();
@@ -1713,6 +1773,16 @@ class AudioPlayer {
                 AndroidEchoEffectSetEnabledRequest(enabled: androidEchoAudioEffectEnabled));
           } catch (e) {
             // EchoAudioEffect not supported on this platform.
+          }
+          try {
+            final mix = karaokeMix;
+            await platform.karaokeSetMix(KaraokeSetMixRequest(
+              enabled: mix.enabled,
+              vocalGain: mix.vocalGain,
+              instrumentalGain: mix.instrumentalGain,
+            ));
+          } catch (e) {
+            // Karaoke mixing not supported on this platform.
           }
           if (checkInterruption()) return inactiveResult(platform);
         }
@@ -2039,6 +2109,57 @@ class PlaybackEvent {
   @override
   String toString() =>
       "{processingState=$processingState, updateTime=$updateTime, updatePosition=$updatePosition, bufferedPosition=$bufferedPosition, duration=$duration, currentIndex=$currentIndex}";
+}
+
+/// The gains applied to the two stems of a four-channel karaoke source.
+///
+/// See [AudioPlayer.setKaraokeMix].
+class KaraokeMix {
+  /// Whether [vocalGain] and [instrumentalGain] apply. When false both stems
+  /// play at unity, which is the original mix.
+  final bool enabled;
+
+  /// Gain applied to the vocal stem (channels 0/1), in [0, 1].
+  final double vocalGain;
+
+  /// Gain applied to the instrumental stem (channels 2/3), in [0, 1].
+  final double instrumentalGain;
+
+  const KaraokeMix({
+    this.enabled = true,
+    this.vocalGain = 1.0,
+    this.instrumentalGain = 1.0,
+  });
+
+  const KaraokeMix.disabled()
+      : enabled = false,
+        vocalGain = 1.0,
+        instrumentalGain = 1.0;
+
+  KaraokeMix copyWith({
+    bool? enabled,
+    double? vocalGain,
+    double? instrumentalGain,
+  }) =>
+      KaraokeMix(
+        enabled: enabled ?? this.enabled,
+        vocalGain: vocalGain ?? this.vocalGain,
+        instrumentalGain: instrumentalGain ?? this.instrumentalGain,
+      );
+
+  @override
+  bool operator ==(Object other) =>
+      other is KaraokeMix &&
+      other.enabled == enabled &&
+      other.vocalGain == vocalGain &&
+      other.instrumentalGain == instrumentalGain;
+
+  @override
+  int get hashCode => Object.hash(enabled, vocalGain, instrumentalGain);
+
+  @override
+  String toString() =>
+      "{enabled=$enabled, vocalGain=$vocalGain, instrumentalGain=$instrumentalGain}";
 }
 
 /// Enumerates the different processing states of a player.
@@ -4289,6 +4410,12 @@ class _IdleAudioPlayer extends AudioPlayerPlatform {
   Future<AndroidEchoEffectSetEnabledResponse> androidEchoEffectSetEnabled(
       AndroidEchoEffectSetEnabledRequest request) async {
     return AndroidEchoEffectSetEnabledResponse();
+  }
+
+  @override
+  Future<KaraokeSetMixResponse> karaokeSetMix(
+      KaraokeSetMixRequest request) async {
+    return KaraokeSetMixResponse(hasKaraokeSource: false);
   }
 
   @override

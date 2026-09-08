@@ -29,5 +29,6 @@
 - (void)applyCanUseNetworkResourcesForLiveStreamingWhilePaused;
 - (void)applyPreferredPeakBitRate;
 - (void)applyEchoTapIfEnabled;
+- (void)applyKaraokeTapIfEnabled;
 
 @end

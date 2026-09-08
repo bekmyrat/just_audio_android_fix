@@ -1,4 +1,5 @@
 #import "IndexedAudioSource.h"
+#import "KaraokeMixTap.h"
 #import "LoadControl.h"
 #import <AVFoundation/AVFoundation.h>
 #import <stdatomic.h>
@@ -14,5 +15,6 @@
 
 - (instancetype)initWithId:(NSString *)sid uri:(NSString *)uri loadControl:(LoadControl *)loadControl headers:(NSDictionary *)headers options:(NSDictionary *)options;
 - (instancetype)initWithId:(NSString *)sid uri:(NSString *)uri loadControl:(LoadControl *)loadControl headers:(NSDictionary *)headers options:(NSDictionary *)options echoEnabled:(atomic_bool *)echoEnabled;
+- (instancetype)initWithId:(NSString *)sid uri:(NSString *)uri loadControl:(LoadControl *)loadControl headers:(NSDictionary *)headers options:(NSDictionary *)options echoEnabled:(atomic_bool *)echoEnabled karaokeParams:(KaraokeMixParams *)karaokeParams;
 
 @end

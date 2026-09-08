@@ -3,6 +3,7 @@
 #import "./include/just_audio/IndexedPlayerItem.h"
 #import "./include/just_audio/LoadControl.h"
 #import "./include/just_audio/MultiTapEchoTap.h"
+#import "./include/just_audio/KaraokeMixTap.h"
 #import <AVFoundation/AVFoundation.h>
 #import <MediaToolbox/MediaToolbox.h>
 
@@ -15,6 +16,7 @@
     NSMutableDictionary *_headers;
     NSDictionary *_options;
     atomic_bool *_echoEnabled;
+    KaraokeMixParams *_karaokeParams;
 }
 
 - (instancetype)initWithId:(NSString *)sid uri:(NSString *)uri loadControl:(LoadControl *)loadControl headers:(NSDictionary *)headers options:(NSDictionary *)options {
@@ -22,6 +24,10 @@
 }
 
 - (instancetype)initWithId:(NSString *)sid uri:(NSString *)uri loadControl:(LoadControl *)loadControl headers:(NSDictionary *)headers options:(NSDictionary *)options echoEnabled:(atomic_bool *)echoEnabled {
+    return [self initWithId:sid uri:uri loadControl:loadControl headers:headers options:options echoEnabled:echoEnabled karaokeParams:NULL];
+}
+
+- (instancetype)initWithId:(NSString *)sid uri:(NSString *)uri loadControl:(LoadControl *)loadControl headers:(NSDictionary *)headers options:(NSDictionary *)options echoEnabled:(atomic_bool *)echoEnabled karaokeParams:(KaraokeMixParams *)karaokeParams {
     self = [super initWithId:sid];
     NSAssert(self, @"super init cannot be nil");
     _uri = uri;
@@ -29,6 +35,7 @@
     _headers = headers != (id)[NSNull null] ? [headers mutableCopy] : nil;
     _options = options;
     _echoEnabled = echoEnabled;
+    _karaokeParams = karaokeParams;
     _playerItem = [self createPlayerItem:uri];
     _playerItem2 = nil;
     return self;
@@ -114,9 +121,63 @@
     }
 }
 
+- (void)applyKaraokeTapIfEnabled {
+    [self attachKaraokeTapToItem:_playerItem];
+    if (_playerItem2) {
+        [self attachKaraokeTapToItem:_playerItem2];
+    }
+}
+
+/// Installs the karaoke downmix tap on [item].
+///
+/// A player item carries a single `audioMix`, so echo and karaoke cannot both
+/// hold a tap on the same track. Karaoke wins: a four-channel source that
+/// reached the output un-mixed would play the vocal stem out of the front pair
+/// and the instrumental out of the rear, which is not a thing anyone wants to
+/// hear. `attachEchoTapToItem:` stands down for items claimed here.
+- (void)attachKaraokeTapToItem:(IndexedPlayerItem *)item {
+    if (!_karaokeParams || !atomic_load_explicit(&_karaokeParams->enabled, memory_order_relaxed)) return;
+    if (!item || item.karaokeTapAttached || item.echoTapAttached) return;
+    AVAsset *asset = item.asset;
+    if (!asset) return;
+    item.karaokeTapAttached = YES;
+
+    __weak IndexedPlayerItem *weakItem = item;
+    KaraokeMixParams *paramsSnapshot = _karaokeParams;
+    [asset loadValuesAsynchronouslyForKeys:@[@"tracks"] completionHandler:^{
+        NSError *error = nil;
+        AVKeyValueStatus status = [asset statusOfValueForKey:@"tracks" error:&error];
+        if (status != AVKeyValueStatusLoaded) {
+            NSLog(@"UriAudioSource: tracks not loaded (status=%ld, err=%@); skipping karaoke tap", (long)status, error);
+            return;
+        }
+        NSArray<AVAssetTrack *> *audioTracks = [asset tracksWithMediaType:AVMediaTypeAudio];
+        if (audioTracks.count == 0) {
+            NSLog(@"UriAudioSource: no audio tracks on asset; skipping karaoke tap");
+            return;
+        }
+        AVAssetTrack *audioTrack = audioTracks.firstObject;
+        MTAudioProcessingTapRef tap = karaoke_mix_create(paramsSnapshot);
+        if (!tap) {
+            return;
+        }
+        AVMutableAudioMixInputParameters *params = [AVMutableAudioMixInputParameters audioMixInputParametersWithTrack:audioTrack];
+        params.audioTapProcessor = tap;
+        CFRelease(tap);
+        AVMutableAudioMix *mix = [AVMutableAudioMix audioMix];
+        mix.inputParameters = @[params];
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            IndexedPlayerItem *strongItem = weakItem;
+            if (!strongItem) return;
+            strongItem.audioMix = mix;
+        });
+    }];
+}
+
 - (void)attachEchoTapToItem:(IndexedPlayerItem *)item {
     if (!_echoEnabled || !atomic_load_explicit(_echoEnabled, memory_order_relaxed)) return;
-    if (!item || item.echoTapAttached) return;
+    if (!item || item.echoTapAttached || item.karaokeTapAttached) return;
     AVAsset *asset = item.asset;
     if (!asset) return;
     // Guard before kicking off the async load so repeated calls (e.g. on each
