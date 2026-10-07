@@ -18,3 +18,7 @@ pubspec.lock
 Podfile.lock
 
 **/.cxx/
+
+# IDE and OS metadata
+.idea/
+.DS_Store

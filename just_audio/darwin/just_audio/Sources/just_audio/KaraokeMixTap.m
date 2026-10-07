@@ -10,7 +10,7 @@ static const int kVocalLeft = 0;
 static const int kVocalRight = 1;
 static const int kInstrumentalLeft = 2;
 static const int kInstrumentalRight = 3;
-static const int kRequiredChannelCount = 4;
+static const int kRequiredChannelCount = KARAOKE_MIX_CHANNEL_COUNT;
 
 /// Compensates for the matrix the system applies when folding a multichannel
 /// asset onto a stereo device. With the stem channels zeroed the usual matrix
@@ -23,6 +23,11 @@ typedef struct {
     UInt32 channelCount;
     bool isNonInterleaved;
     bool prepared; // Four-channel float PCM; otherwise this tap passes through.
+    // Gains the previous buffer ended on, which the next one ramps away from.
+    // Only touched on the audio thread.
+    float vocal;
+    float instrumental;
+    bool primed; // False until the first buffer, which starts on its target.
 } KaraokeMixState;
 
 static inline float karaoke_clampf(float v) {
@@ -37,7 +42,7 @@ KaraokeMixParams *karaoke_mix_params_create(void) {
     atomic_init(&params->enabled, false);
     atomic_init(&params->vocalGain, 1.0f);
     atomic_init(&params->instrumentalGain, 1.0f);
-    atomic_init(&params->active, false);
+    atomic_init(&params->armed, false);
     return params;
 }
 
@@ -75,10 +80,7 @@ static void karaoke_mix_prepare_cb(MTAudioProcessingTapRef tap,
     s->isNonInterleaved = (processingFormat->mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0;
     bool isFloat = (processingFormat->mFormatFlags & kAudioFormatFlagIsFloat) != 0;
     s->prepared = isFloat && s->channelCount >= kRequiredChannelCount;
-
-    if (s->params) {
-        atomic_store_explicit(&s->params->active, s->prepared, memory_order_relaxed);
-    }
+    s->primed = false;
 
     // Whether the four channels survive as far as the tap is the one thing
     // about this path that can't be settled by reading the code, so say what
@@ -93,9 +95,6 @@ static void karaoke_mix_unprepare_cb(MTAudioProcessingTapRef tap) {
     KaraokeMixState *s = (KaraokeMixState *)MTAudioProcessingTapGetStorage(tap);
     if (!s) return;
     s->prepared = false;
-    if (s->params) {
-        atomic_store_explicit(&s->params->active, false, memory_order_relaxed);
-    }
 }
 
 static void karaoke_mix_process_cb(MTAudioProcessingTapRef tap,
@@ -125,12 +124,23 @@ static void karaoke_mix_process_cb(MTAudioProcessingTapRef tap,
     // Disabled means "play it as it was mixed", not "mute a stem" — the fold to
     // stereo still has to happen either way.
     bool enabled = atomic_load_explicit(&s->params->enabled, memory_order_relaxed);
-    float vocal = enabled
-        ? atomic_load_explicit(&s->params->vocalGain, memory_order_relaxed) : 1.0f;
-    float instrumental = enabled
-        ? atomic_load_explicit(&s->params->instrumentalGain, memory_order_relaxed) : 1.0f;
-    vocal *= kOutputMakeupGain;
-    instrumental *= kOutputMakeupGain;
+    float targetVocal = kOutputMakeupGain * (enabled
+        ? atomic_load_explicit(&s->params->vocalGain, memory_order_relaxed) : 1.0f);
+    float targetInstrumental = kOutputMakeupGain * (enabled
+        ? atomic_load_explicit(&s->params->instrumentalGain, memory_order_relaxed) : 1.0f);
+
+    // Step the gains from where the last buffer left them to the new target
+    // over this buffer. Jumping straight there makes every slider movement an
+    // audible click on a loud vocal.
+    if (!s->primed) {
+        s->vocal = targetVocal;
+        s->instrumental = targetInstrumental;
+        s->primed = true;
+    }
+    float vocal = s->vocal;
+    float instrumental = s->instrumental;
+    const float vocalStep = (targetVocal - vocal) / (float)numFrames;
+    const float instrumentalStep = (targetInstrumental - instrumental) / (float)numFrames;
 
     if (s->isNonInterleaved) {
         if (bufferListInOut->mNumberBuffers < (UInt32)kRequiredChannelCount) return;
@@ -141,6 +151,8 @@ static void karaoke_mix_process_cb(MTAudioProcessingTapRef tap,
         if (!vocalL || !vocalR || !instrL || !instrR) return;
 
         for (int n = 0; n < numFrames; n++) {
+            vocal += vocalStep;
+            instrumental += instrumentalStep;
             float left = vocalL[n] * vocal + instrL[n] * instrumental;
             float right = vocalR[n] * vocal + instrR[n] * instrumental;
             vocalL[n] = karaoke_clampf(left);
@@ -160,6 +172,8 @@ static void karaoke_mix_process_cb(MTAudioProcessingTapRef tap,
         if (channels < kRequiredChannelCount) return;
 
         for (int n = 0; n < numFrames; n++) {
+            vocal += vocalStep;
+            instrumental += instrumentalStep;
             int base = n * channels;
             float left = samples[base + kVocalLeft] * vocal
                        + samples[base + kInstrumentalLeft] * instrumental;
@@ -172,6 +186,10 @@ static void karaoke_mix_process_cb(MTAudioProcessingTapRef tap,
             }
         }
     }
+
+    // Exactly the target, not the accumulated ramp, so rounding never drifts.
+    s->vocal = targetVocal;
+    s->instrumental = targetInstrumental;
 }
 
 MTAudioProcessingTapRef karaoke_mix_create(KaraokeMixParams *params) {

@@ -9,6 +9,9 @@
 extern "C" {
 #endif
 
+/// Channels a karaoke source carries: vocal stem on 0/1, instrumental on 2/3.
+#define KARAOKE_MIX_CHANNEL_COUNT 4
+
 /// Mix state shared between the plugin and the realtime audio thread.
 ///
 /// Heap-allocated and owned by `AudioPlayer`, which hands the pointer to every
@@ -21,11 +24,13 @@ typedef struct {
     atomic_bool enabled;
     _Atomic float vocalGain;
     _Atomic float instrumentalGain;
-    /// Set by the tap once it knows the source format: true when the asset
-    /// really did arrive with four channels and the downmix is running. Lets
-    /// the app tell "the slider does nothing" apart from "the slider is at
-    /// zero" instead of leaving the user to wonder.
-    atomic_bool active;
+    /// Set the first time karaoke is enabled and never cleared. From then on
+    /// every queued item is checked for four channels and given the tap if it
+    /// has them, whether or not the gains currently apply: a karaoke file can
+    /// stay loaded after karaoke is switched off, and still needs folding.
+    /// Until then nothing is checked, so players that never use karaoke pay
+    /// nothing for it.
+    atomic_bool armed;
 } KaraokeMixParams;
 
 KaraokeMixParams *_Nullable karaoke_mix_params_create(void);
@@ -37,6 +42,9 @@ void karaoke_mix_params_free(KaraokeMixParams *_Nullable params);
 ///
 ///     out_L = vocalGain * ch0 + instrumentalGain * ch2
 ///     out_R = vocalGain * ch1 + instrumentalGain * ch3
+///
+/// A gain change is ramped across one buffer rather than applied as a step, so
+/// dragging the slider doesn't click.
 ///
 /// The mix is written back over channels 0/1 and the stem channels are zeroed,
 /// so whatever downmix the system applies on the way to a stereo device passes

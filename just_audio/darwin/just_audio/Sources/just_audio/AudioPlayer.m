@@ -211,19 +211,18 @@
                 atomic_store_explicit(&_karaokeParams->instrumentalGain,
                                       [request[@"instrumentalGain"] floatValue], memory_order_relaxed);
                 atomic_store_explicit(&_karaokeParams->enabled, karaokeEnabled, memory_order_relaxed);
+                if (karaokeEnabled) {
+                    atomic_store_explicit(&_karaokeParams->armed, true, memory_order_relaxed);
+                }
             }
-            // Turning karaoke on won't fire the currentItem observer, so claim
-            // the item that is already playing right now.
-            if (karaokeEnabled && _indexedAudioSources.count > 0 &&
-                _index >= 0 && _index < _indexedAudioSources.count) {
-                [_indexedAudioSources[_index] applyKaraokeTapIfEnabled];
-            }
-            // Only meaningful once the tap has been prepared for the current
-            // item; before that it reads false. Callers re-read it as they
-            // move the slider, which is when the answer starts to matter.
-            BOOL karaokeActive = _karaokeParams
-                ? atomic_load_explicit(&_karaokeParams->active, memory_order_relaxed) : NO;
-            result(@{@"hasKaraokeSource": @(karaokeActive)});
+            // Arming doesn't fire the currentItem observer or re-run the queue,
+            // so offer the tap to every item already queued right now.
+            [self applyKaraokeTapToQueuedItems];
+            // Whether the item playing right now is four-channel and being
+            // mixed. False until its tap is attached, which is asynchronous, so
+            // a call made as a track starts can read false for a moment.
+            IndexedPlayerItem *currentItem = (IndexedPlayerItem *)_player.currentItem;
+            result(@{@"hasKaraokeSource": @(currentItem.karaokeMixing)});
         } else {
             result(FlutterMethodNotImplemented);
         }
@@ -629,6 +628,10 @@
     /* NSLog(@"after reorder: _player.items.count: ", _player.items.count); */
     /* [self dumpQueue]; */
 
+    // Before AVQueuePlayer prerolls them, so a karaoke item never renders a
+    // buffer through the system downmix. No-op until karaoke has been armed.
+    [self applyKaraokeTapToQueuedItems];
+
     if (_processingState != psLoading && oldItem != newItem) {
         // || !_player.currentItem.playbackLikelyToKeepUp;
         if (_player.currentItem.playbackBufferEmpty) {
@@ -640,6 +643,18 @@
     }
 
     [self updateEndAction];
+}
+
+/// Offers the karaoke tap to every item on the AVQueuePlayer (the current one
+/// and those prerolling behind it). Each item checks for itself whether it is
+/// four-channel; see -[UriAudioSource attachKaraokeTapToItem:].
+- (void)applyKaraokeTapToQueuedItems {
+    if (!_karaokeParams || !atomic_load_explicit(&_karaokeParams->armed, memory_order_relaxed)) return;
+    for (AVPlayerItem *item in _player.items) {
+        if ([item isKindOfClass:[IndexedPlayerItem class]]) {
+            [((IndexedPlayerItem *)item).audioSource applyKaraokeTapIfEnabled];
+        }
+    }
 }
 
 - (void)updatePosition {
@@ -970,7 +985,8 @@
         // becoming current, rather than on every source at creation time (which
         // would force a network asset load per queue item). Both are no-ops
         // when their effect is off or a tap is already attached; karaoke is
-        // offered the item first because its downmix is not optional.
+        // offered the item first because its downmix is not optional. (Karaoke
+        // normally got there already, when the item was queued.)
         [playerItem.audioSource applyKaraokeTapIfEnabled];
         [playerItem.audioSource applyEchoTapIfEnabled];
         //NSLog(@"currentItem changed. _index=%d", _index);

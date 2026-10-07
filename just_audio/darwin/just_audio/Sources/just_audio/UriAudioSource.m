@@ -128,50 +128,100 @@
     }
 }
 
-/// Installs the karaoke downmix tap on [item].
+/// The most channels any of [track]'s format descriptions declares.
+static UInt32 karaoke_track_channel_count(AVAssetTrack *track) {
+    UInt32 channels = 0;
+    for (id description in track.formatDescriptions) {
+        const AudioStreamBasicDescription *asbd = CMAudioFormatDescriptionGetStreamBasicDescription(
+            (__bridge CMAudioFormatDescriptionRef)description);
+        if (asbd && asbd->mChannelsPerFrame > channels) {
+            channels = asbd->mChannelsPerFrame;
+        }
+    }
+    return channels;
+}
+
+/// Installs the karaoke downmix tap on [item] if its audio is four-channel.
+///
+/// Gated on the params being armed rather than enabled: a karaoke file can stay
+/// loaded after karaoke is switched off (the app leaves it playing rather than
+/// reloading), and it has to be folded to stereo all the same. What decides is
+/// the asset's channel count, which is why this checks it rather than trusting
+/// the switch.
+///
+/// Offered every item as it is queued on the AVQueuePlayer, not only once it
+/// becomes current, so the tap is in place before the first buffer renders.
+/// Attached late, the opening moments of a karaoke track play through the
+/// system's own downmix — vocal at full — before the mix takes over.
 ///
 /// A player item carries a single `audioMix`, so echo and karaoke cannot both
-/// hold a tap on the same track. Karaoke wins: a four-channel source that
-/// reached the output un-mixed would play the vocal stem out of the front pair
-/// and the instrumental out of the rear, which is not a thing anyone wants to
-/// hear. `attachEchoTapToItem:` stands down for items claimed here.
+/// hold a tap on the same track. Karaoke wins on a four-channel item: un-mixed,
+/// it would play the vocal stem out of the front pair and the instrumental out
+/// of the rear. Anything else is handed back for echo to claim.
 - (void)attachKaraokeTapToItem:(IndexedPlayerItem *)item {
-    if (!_karaokeParams || !atomic_load_explicit(&_karaokeParams->enabled, memory_order_relaxed)) return;
-    if (!item || item.karaokeTapAttached || item.echoTapAttached) return;
+    if (!_karaokeParams || !atomic_load_explicit(&_karaokeParams->armed, memory_order_relaxed)) return;
+    if (!item || item.karaokeTapAttached || item.karaokeNotApplicable || item.echoTapAttached) return;
     AVAsset *asset = item.asset;
     if (!asset) return;
+    // Claimed before the async work so repeat offers don't start a second load.
     item.karaokeTapAttached = YES;
 
     __weak IndexedPlayerItem *weakItem = item;
+    __weak UriAudioSource *weakSelf = self;
     KaraokeMixParams *paramsSnapshot = _karaokeParams;
+    // Hands the item back for echo. `settled` records that it isn't
+    // four-channel, so it isn't checked again on every queue change; a failed
+    // load leaves it unsettled, to be retried.
+    void (^release)(BOOL settled) = ^(BOOL settled) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            IndexedPlayerItem *strongItem = weakItem;
+            if (!strongItem) return;
+            strongItem.karaokeTapAttached = NO;
+            strongItem.karaokeNotApplicable = settled;
+            [weakSelf attachEchoTapToItem:strongItem];
+        });
+    };
     [asset loadValuesAsynchronouslyForKeys:@[@"tracks"] completionHandler:^{
         NSError *error = nil;
         AVKeyValueStatus status = [asset statusOfValueForKey:@"tracks" error:&error];
         if (status != AVKeyValueStatusLoaded) {
             NSLog(@"UriAudioSource: tracks not loaded (status=%ld, err=%@); skipping karaoke tap", (long)status, error);
+            release(NO);
             return;
         }
-        NSArray<AVAssetTrack *> *audioTracks = [asset tracksWithMediaType:AVMediaTypeAudio];
-        if (audioTracks.count == 0) {
-            NSLog(@"UriAudioSource: no audio tracks on asset; skipping karaoke tap");
+        AVAssetTrack *audioTrack = [asset tracksWithMediaType:AVMediaTypeAudio].firstObject;
+        if (!audioTrack) {
+            release(YES);
             return;
         }
-        AVAssetTrack *audioTrack = audioTracks.firstObject;
-        MTAudioProcessingTapRef tap = karaoke_mix_create(paramsSnapshot);
-        if (!tap) {
-            return;
-        }
-        AVMutableAudioMixInputParameters *params = [AVMutableAudioMixInputParameters audioMixInputParametersWithTrack:audioTrack];
-        params.audioTapProcessor = tap;
-        CFRelease(tap);
-        AVMutableAudioMix *mix = [AVMutableAudioMix audioMix];
-        mix.inputParameters = @[params];
+        [audioTrack loadValuesAsynchronouslyForKeys:@[@"formatDescriptions"] completionHandler:^{
+            if ([audioTrack statusOfValueForKey:@"formatDescriptions" error:nil] != AVKeyValueStatusLoaded) {
+                release(NO);
+                return;
+            }
+            if (karaoke_track_channel_count(audioTrack) < KARAOKE_MIX_CHANNEL_COUNT) {
+                // An ordinary stereo track: nothing to fold.
+                release(YES);
+                return;
+            }
+            MTAudioProcessingTapRef tap = karaoke_mix_create(paramsSnapshot);
+            if (!tap) {
+                release(NO);
+                return;
+            }
+            AVMutableAudioMixInputParameters *params = [AVMutableAudioMixInputParameters audioMixInputParametersWithTrack:audioTrack];
+            params.audioTapProcessor = tap;
+            CFRelease(tap);
+            AVMutableAudioMix *mix = [AVMutableAudioMix audioMix];
+            mix.inputParameters = @[params];
 
-        dispatch_async(dispatch_get_main_queue(), ^{
-            IndexedPlayerItem *strongItem = weakItem;
-            if (!strongItem) return;
-            strongItem.audioMix = mix;
-        });
+            dispatch_async(dispatch_get_main_queue(), ^{
+                IndexedPlayerItem *strongItem = weakItem;
+                if (!strongItem) return;
+                strongItem.audioMix = mix;
+                strongItem.karaokeMixing = YES;
+            });
+        }];
     }];
 }
 

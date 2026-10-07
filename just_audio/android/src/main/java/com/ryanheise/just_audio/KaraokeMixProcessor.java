@@ -8,7 +8,8 @@ import java.nio.ByteOrder;
 
 /**
  * Downmixes a four-channel "karaoke" source to stereo, applying an independent
- * gain to each of the two stems it carries.
+ * gain to each of the two stems it carries. A gain change is ramped across one
+ * buffer rather than applied as a step, so dragging the slider doesn't click.
  *
  * <p>The source is expected to hold the vocal stem on channels 0/1 and the
  * instrumental stem on channels 2/3 — the layout produced by merging a
@@ -52,6 +53,17 @@ public class KaraokeMixProcessor implements AudioProcessor {
   private volatile float vocalGain = 1.0f;
   private volatile float instrumentalGain = 1.0f;
 
+  // Whether the configuration in use right now (not one still pending) is a
+  // four-channel source being mixed. Written on the playback thread, read
+  // from the platform channel thread.
+  private volatile boolean mixing = false;
+
+  // The gains the previous buffer ended on, which the next buffer ramps away
+  // from. Playback thread only.
+  private float appliedVocalGain;
+  private float appliedInstrumentalGain;
+  private boolean gainsPrimed = false;
+
   public KaraokeMixProcessor() {
     buffer = EMPTY_BUFFER;
     outputBuffer = EMPTY_BUFFER;
@@ -86,12 +98,16 @@ public class KaraokeMixProcessor implements AudioProcessor {
   }
 
   /**
-   * Whether the source that is currently configured actually carries two stems.
+   * Whether the source being processed right now actually carries two stems.
    * Lets the player report back whether karaoke is doing anything, rather than
    * leaving the app to guess from silence.
+   *
+   * <p>Reads the configuration in use, not {@link #isActive}: during a gapless
+   * transition the next track's format is configured while the current one is
+   * still playing, and that would answer for the wrong track.
    */
   public boolean hasKaraokeSource() {
-    return isActive();
+    return mixing;
   }
 
   @Override public AudioFormat configure(AudioFormat inputAudioFormat)
@@ -130,13 +146,28 @@ public class KaraokeMixProcessor implements AudioProcessor {
 
     // Disabled means "play it as it was mixed", not "mute a stem".
     boolean enabled = isEnabled;
-    float vocal = enabled ? vocalGain : 1.0f;
-    float instrumental = enabled ? instrumentalGain : 1.0f;
+    float targetVocal = enabled ? vocalGain : 1.0f;
+    float targetInstrumental = enabled ? instrumentalGain : 1.0f;
+
+    // Step the gains from where the last buffer left them to the new target
+    // over this buffer. Jumping straight there makes every slider movement an
+    // audible click on a loud vocal.
+    if (!gainsPrimed) {
+      appliedVocalGain = targetVocal;
+      appliedInstrumentalGain = targetInstrumental;
+      gainsPrimed = true;
+    }
+    float vocal = appliedVocalGain;
+    float instrumental = appliedInstrumentalGain;
+    float vocalStep = (targetVocal - vocal) / frames;
+    float instrumentalStep = (targetInstrumental - instrumental) / frames;
 
     ByteBuffer buffer = replaceOutputBuffer(frames * OUTPUT_CHANNEL_COUNT * 2);
     int position = inputBuffer.position();
 
     for (int frame = 0; frame < frames; frame++) {
+      vocal += vocalStep;
+      instrumental += instrumentalStep;
       int base = position + frame * inputFrameSize;
       short vocalL = inputBuffer.getShort(base);
       short vocalR = inputBuffer.getShort(base + 2);
@@ -146,6 +177,10 @@ public class KaraokeMixProcessor implements AudioProcessor {
       buffer.putShort(mix(vocalL, vocal, instrumentalL, instrumental));
       buffer.putShort(mix(vocalR, vocal, instrumentalR, instrumental));
     }
+
+    // Exactly the target, not the accumulated ramp, so rounding never drifts.
+    appliedVocalGain = targetVocal;
+    appliedInstrumentalGain = targetInstrumental;
 
     // Channels beyond the two stems (if the file ever carries any) are dropped.
     inputBuffer.position(position + frames * inputFrameSize);
@@ -185,6 +220,10 @@ public class KaraokeMixProcessor implements AudioProcessor {
     inputEnded = false;
     inputAudioFormat = pendingInputAudioFormat;
     outputAudioFormat = pendingOutputAudioFormat;
+    mixing = !outputAudioFormat.equals(AudioFormat.NOT_SET);
+    // After a seek or a new track, start on the current gains instead of
+    // ramping from wherever the old position left off.
+    gainsPrimed = false;
   }
 
   @Override public void reset() {
@@ -194,6 +233,7 @@ public class KaraokeMixProcessor implements AudioProcessor {
     pendingOutputAudioFormat = AudioFormat.NOT_SET;
     inputAudioFormat = AudioFormat.NOT_SET;
     outputAudioFormat = AudioFormat.NOT_SET;
+    mixing = false;
   }
 
   private ByteBuffer replaceOutputBuffer(int size) {
