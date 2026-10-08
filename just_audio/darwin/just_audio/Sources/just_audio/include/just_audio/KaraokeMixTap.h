@@ -31,6 +31,11 @@ typedef struct {
     /// Until then nothing is checked, so players that never use karaoke pay
     /// nothing for it.
     atomic_bool armed;
+    /// The player's echo switch. A player item holds a single tap, so an item
+    /// claimed by the karaoke downmix can't take the echo tap as well; the
+    /// downmix runs the echo itself, on the stereo pair it produces, whenever
+    /// this reads true. Set once by `AudioPlayer`, which owns both.
+    atomic_bool *_Nullable echoEnabled;
 } KaraokeMixParams;
 
 KaraokeMixParams *_Nullable karaoke_mix_params_create(void);

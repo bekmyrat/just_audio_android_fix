@@ -1,4 +1,5 @@
 #import "./include/just_audio/KaraokeMixTap.h"
+#import "./include/just_audio/MultiTapEchoTap.h"
 #import <AVFoundation/AVFoundation.h>
 #import <MediaToolbox/MediaToolbox.h>
 #import <stdatomic.h>
@@ -28,6 +29,8 @@ typedef struct {
     float vocal;
     float instrumental;
     bool primed; // False until the first buffer, which starts on its target.
+    // Echo on the folded stereo pair; see KaraokeMixParams.echoEnabled.
+    MultiTapEcho *echo;
 } KaraokeMixState;
 
 static inline float karaoke_clampf(float v) {
@@ -60,6 +63,7 @@ static void karaoke_mix_init_cb(MTAudioProcessingTapRef tap,
     }
     s->params = (KaraokeMixParams *)clientInfo;
     s->prepared = false;
+    s->echo = multi_tap_echo_new();
     *tapStorageOut = s;
 }
 
@@ -67,6 +71,7 @@ static void karaoke_mix_finalize_cb(MTAudioProcessingTapRef tap) {
     KaraokeMixState *s = (KaraokeMixState *)MTAudioProcessingTapGetStorage(tap);
     if (!s) return;
     // `params` outlives the tap and is freed by AudioPlayer.
+    multi_tap_echo_free(s->echo);
     free(s);
 }
 
@@ -81,6 +86,10 @@ static void karaoke_mix_prepare_cb(MTAudioProcessingTapRef tap,
     bool isFloat = (processingFormat->mFormatFlags & kAudioFormatFlagIsFloat) != 0;
     s->prepared = isFloat && s->channelCount >= kRequiredChannelCount;
     s->primed = false;
+    if (s->echo) {
+        // Only the stereo pair the downmix writes to is echoed.
+        multi_tap_echo_prepare(s->echo, 2, processingFormat->mSampleRate, maxFrames);
+    }
 
     // Whether the four channels survive as far as the tap is the one thing
     // about this path that can't be settled by reading the code, so say what
@@ -95,6 +104,7 @@ static void karaoke_mix_unprepare_cb(MTAudioProcessingTapRef tap) {
     KaraokeMixState *s = (KaraokeMixState *)MTAudioProcessingTapGetStorage(tap);
     if (!s) return;
     s->prepared = false;
+    if (s->echo) multi_tap_echo_unprepare(s->echo);
 }
 
 static void karaoke_mix_process_cb(MTAudioProcessingTapRef tap,
@@ -190,6 +200,15 @@ static void karaoke_mix_process_cb(MTAudioProcessingTapRef tap,
     // Exactly the target, not the accumulated ramp, so rounding never drifts.
     s->vocal = targetVocal;
     s->instrumental = targetInstrumental;
+
+    // The echo the item's own tap would have added, had the downmix not
+    // claimed the item's only tap slot.
+    if (s->echo) {
+        atomic_bool *echoFlag = s->params->echoEnabled;
+        bool echoOn = echoFlag && atomic_load_explicit(echoFlag, memory_order_relaxed);
+        multi_tap_echo_process(s->echo, echoOn, bufferListInOut, numFrames,
+                               s->isNonInterleaved, s->channelCount, 2);
+    }
 }
 
 MTAudioProcessingTapRef karaoke_mix_create(KaraokeMixParams *params) {

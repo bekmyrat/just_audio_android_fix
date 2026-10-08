@@ -126,6 +126,10 @@
     _echoEnabled = (atomic_bool *)calloc(1, sizeof(atomic_bool));
     atomic_init(_echoEnabled, false);
     _karaokeParams = karaoke_mix_params_create();
+    if (_karaokeParams) {
+        // Items claimed by the karaoke downmix run echo inside it.
+        _karaokeParams->echoEnabled = _echoEnabled;
+    }
     __weak __typeof__(self) weakSelf = self;
     [_methodChannel setMethodCallHandler:^(FlutterMethodCall* call, FlutterResult result) {
         [weakSelf handleMethodCall:call result:result];
@@ -764,7 +768,7 @@
     }
 
     if (_playing) {
-        _player.rate = _speed;
+        [self startRate];
     }
     [_player setVolume:_volume];
     [self broadcastPlaybackEvent];
@@ -854,6 +858,15 @@
         switch (status) {
             case AVPlayerItemStatusReadyToPlay: {
                 if (playerItem != _player.currentItem) return;
+                if (_playing) {
+                    // Playback was started before the item was ready, and
+                    // installing its audio mix since (the karaoke downmix)
+                    // drops AVPlayer back to waiting to minimize stalls — where
+                    // it was seen to sit for seconds without fetching anything.
+                    // Start it again now. A stall later in the item doesn't
+                    // come through here, so it is still waited out.
+                    [self startRate];
+                }
                 // Detect buffering in different ways depending on whether we're playing
                 if (_playing) {
                     if (@available(macOS 10.12, iOS 10.0, *)) {
@@ -1114,6 +1127,26 @@
     [self play:nil];
 }
 
+/// Sets the player going at `_speed`, everywhere playback starts or resumes.
+///
+/// With automaticallyWaitsToMinimizeStalling on, a plain rate change first
+/// waits until AVPlayer judges the buffer sufficient — and on an item just
+/// loaded with its audio mix still being installed (the karaoke downmix) it
+/// was seen waiting indefinitely without fetching anything.
+/// playImmediatelyAtRate: starts at once, like turning that setting off, but
+/// leaves it on, so a stall later still waits for data and resumes by itself.
+/// With it off, a stall drops the rate to 0 for good while the app goes on
+/// showing playback.
+- (void)startRate {
+    if (@available(macOS 10.12, iOS 10.0, *)) {
+        if (_player.automaticallyWaitsToMinimizeStalling) {
+            [_player playImmediatelyAtRate:_speed];
+            return;
+        }
+    }
+    _player.rate = _speed;
+}
+
 - (void)play:(FlutterResult)result {
     if (_playing) {
         if (result) {
@@ -1129,7 +1162,7 @@
         _playResult = result;
     }
     _playing = YES;
-    _player.rate = _speed;
+    [self startRate];
     [self updatePosition];
     if (@available(macOS 10.12, iOS 10.0, *)) {}
     else {
@@ -1200,7 +1233,7 @@
     // supported.
     _speed = speed;
     if (_playing && _player) {
-        _player.rate = speed;
+        [self startRate];
     }
     [self updatePosition];
 }
@@ -1348,7 +1381,7 @@
                         }
                     }
                     if (self->_playing) {
-                        self->_player.rate = self->_speed;
+                        [self startRate];
                     }
                     self->_seekPos = kCMTimeInvalid;
                     [self broadcastPlaybackEvent];
@@ -1364,9 +1397,9 @@
                         // how to detect buffering when buffered audio is not
                         // immediately available.
                         //[_player playImmediatelyAtRate:_speed];
-                        _player.rate = _speed;
+                        [self startRate];
                     } else {
-                        _player.rate = _speed;
+                        [self startRate];
                     }
                 }
                 [self broadcastPlaybackEvent];
@@ -1396,9 +1429,9 @@
                     // detect buffering when buffered audio is not immediately
                     // available.
                     //[_player playImmediatelyAtRate:_speed];
-                    self->_player.rate = self->_speed;
+                    [self startRate];
                 } else {
-                    self->_player.rate = self->_speed;
+                    [self startRate];
                 }
             } else {
                 // If not playing, there is no reliable way to detect
