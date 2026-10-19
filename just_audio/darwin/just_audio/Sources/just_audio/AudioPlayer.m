@@ -816,6 +816,19 @@
     //NSLog(@"onFailToComplete");
 }
 
+// The event announcing the next item must also carry its position. Without
+// this it went out with the new index and duration but the ended item's
+// position, so Dart clamped that to the new duration and remote controls
+// (CarPlay, lock screen) showed the seekbar at the end of the new track until
+// the next event reset it to 0. Repeat-one sent no event at all on restart, so
+// the seekbar stayed at the end the same way. The ended item's own seek to
+// zero is async, so the position is set directly rather than read back from
+// the player.
+- (void)resetPositionForAdvance {
+    _updatePosition = 0;
+    _updateTime = (long long)([[NSDate date] timeIntervalSince1970] * 1000.0);
+}
+
 - (void)onComplete:(NSNotification *)notification {
     //NSLog(@"onComplete");
 
@@ -824,16 +837,20 @@
 
     if (_loopMode == lmLoopOne) {
         [endedSource seek:kCMTimeZero];
+        [self resetPositionForAdvance];
+        [self broadcastPlaybackEvent];
         _justAdvanced = YES;
     } else if (_loopMode == lmLoopAll) {
         [endedSource seek:kCMTimeZero];
         _index = [_order[([_orderInv[_index] intValue] + 1) % _order.count] intValue];
+        [self resetPositionForAdvance];
         [self broadcastPlaybackEvent];
         _justAdvanced = YES;
     } else if ([_orderInv[_index] intValue] + 1 < [_order count]) {
         [endedSource seek:kCMTimeZero];
         _index = [_order[([_orderInv[_index] intValue] + 1)] intValue];
         [self updateEndAction];
+        [self resetPositionForAdvance];
         [self broadcastPlaybackEvent];
         _justAdvanced = YES;
     } else {
